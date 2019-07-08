@@ -30,6 +30,8 @@ use Enqueue\Rpc\RpcFactory;
 use Enqueue\Symfony\Client\DependencyInjection\ClientFactory;
 use Enqueue\Symfony\DependencyInjection\TransportFactory;
 use Interop\Queue\Processor;
+use JsonSerializable;
+use LogicException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
@@ -111,11 +113,15 @@ final class SimpleClient
      *   'extensions' => [
      *     'signal_extension' => true,
      *     'reply_extension' => true,
+     *     'custom_extensions' => [
+     *       new CustomExtension()
+     *     ],
      *   ]
      * ]
      *
      *
      * @param string|array $config
+     * @param LoggerInterface|null $logger
      */
     public function __construct($config, LoggerInterface $logger = null)
     {
@@ -131,124 +137,19 @@ final class SimpleClient
         $this->build(['enqueue' => $config]);
     }
 
-    /**
-     * @param callable|Processor $processor
-     */
-    public function bindTopic(string $topic, $processor, string $processorName = null): void
-    {
-        if (is_callable($processor)) {
-            $processor = new CallbackProcessor($processor);
-        }
-
-        if (false == $processor instanceof Processor) {
-            throw new \LogicException('The processor must be either callable or instance of Processor');
-        }
-
-        $processorName = $processorName ?: uniqid(get_class($processor));
-
-        $this->driver->getRouteCollection()->add(new Route($topic, Route::TOPIC, $processorName));
-        $this->processorRegistry->add($processorName, $processor);
-    }
-
-    /**
-     * @param callable|Processor $processor
-     */
-    public function bindCommand(string $command, $processor, string $processorName = null): void
-    {
-        if (is_callable($processor)) {
-            $processor = new CallbackProcessor($processor);
-        }
-
-        if (false == $processor instanceof Processor) {
-            throw new \LogicException('The processor must be either callable or instance of Processor');
-        }
-
-        $processorName = $processorName ?: uniqid(get_class($processor));
-
-        $this->driver->getRouteCollection()->add(new Route($command, Route::COMMAND, $processorName));
-        $this->processorRegistry->add($processorName, $processor);
-    }
-
-    /**
-     * @param string|array|\JsonSerializable|Message $message
-     */
-    public function sendCommand(string $command, $message, bool $needReply = false): ?Promise
-    {
-        return $this->producer->sendCommand($command, $message, $needReply);
-    }
-
-    /**
-     * @param string|array|Message $message
-     */
-    public function sendEvent(string $topic, $message): void
-    {
-        $this->producer->sendEvent($topic, $message);
-    }
-
-    public function consume(ExtensionInterface $runtimeExtension = null): void
-    {
-        $this->setupBroker();
-
-        $boundQueues = [];
-
-        $routerQueue = $this->getDriver()->createQueue($this->getDriver()->getConfig()->getRouterQueue());
-        $this->queueConsumer->bind($routerQueue, $this->delegateProcessor);
-        $boundQueues[$routerQueue->getQueueName()] = true;
-
-        foreach ($this->driver->getRouteCollection()->all() as $route) {
-            $queue = $this->getDriver()->createRouteQueue($route);
-            if (array_key_exists($queue->getQueueName(), $boundQueues)) {
-                continue;
-            }
-
-            $this->queueConsumer->bind($queue, $this->delegateProcessor);
-
-            $boundQueues[$queue->getQueueName()] = true;
-        }
-
-        $this->queueConsumer->consume($runtimeExtension);
-    }
-
-    public function getQueueConsumer(): QueueConsumerInterface
-    {
-        return $this->queueConsumer;
-    }
-
-    public function getDriver(): DriverInterface
-    {
-        return $this->driver;
-    }
-
-    public function getProducer(bool $setupBroker = false): ProducerInterface
-    {
-        $setupBroker && $this->setupBroker();
-
-        return $this->producer;
-    }
-
-    public function getDelegateProcessor(): DelegateProcessor
-    {
-        return $this->delegateProcessor;
-    }
-
-    public function setupBroker(): void
-    {
-        $this->getDriver()->setupBroker();
-    }
-
     public function build(array $configs): void
     {
         $configProcessor = new ConfigProcessor();
         $simpleClientConfig = $configProcessor->process($this->createConfiguration(), $configs);
 
         if (isset($simpleClientConfig['transport']['factory_service'])) {
-            throw new \LogicException('transport.factory_service option is not supported by simple client');
+            throw new LogicException('transport.factory_service option is not supported by simple client');
         }
         if (isset($simpleClientConfig['transport']['factory_class'])) {
-            throw new \LogicException('transport.factory_class option is not supported by simple client');
+            throw new LogicException('transport.factory_class option is not supported by simple client');
         }
         if (isset($simpleClientConfig['transport']['connection_factory_class'])) {
-            throw new \LogicException('transport.connection_factory_class option is not supported by simple client');
+            throw new LogicException('transport.connection_factory_class option is not supported by simple client');
         }
 
         $connectionFactoryFactory = new ConnectionFactoryFactory();
@@ -299,6 +200,12 @@ final class SimpleClient
             $consumptionExtensions[] = new ReplyExtension();
         }
 
+        if (array_key_exists('custom_extensions', $simpleClientConfig['extensions'])) {
+            foreach ($simpleClientConfig['extensions']['custom_extensions'] as $custom_extension) {
+                $consumptionExtensions[] = $custom_extension;
+            }
+        }
+
         $consumptionExtensions[] = new SetRouterPropertiesExtension($driver);
         $consumptionExtensions[] = new LogExtension();
 
@@ -335,16 +242,127 @@ final class SimpleClient
         $rootNode
             ->append(TransportFactory::getConfiguration())
             ->append(TransportFactory::getQueueConsumerConfiguration())
-            ->append(ClientFactory::getConfiguration(false))
-        ;
+            ->append(ClientFactory::getConfiguration(false));
 
         $rootNode->children()
             ->arrayNode('extensions')->addDefaultsIfNotSet()->children()
-                ->booleanNode('signal_extension')->defaultValue(function_exists('pcntl_signal_dispatch'))->end()
-                ->booleanNode('reply_extension')->defaultTrue()->end()
-            ->end()
-        ;
+            ->booleanNode('signal_extension')->defaultValue(function_exists('pcntl_signal_dispatch'))->end()
+            ->booleanNode('reply_extension')->defaultTrue()->end()
+            ->end();
 
         return $tb->buildTree();
+    }
+
+    /**
+     * @param string $topic
+     * @param callable|Processor $processor
+     * @param string|null $processorName
+     */
+    public function bindTopic(string $topic, $processor, string $processorName = null): void
+    {
+        if (is_callable($processor)) {
+            $processor = new CallbackProcessor($processor);
+        }
+
+        if (false == $processor instanceof Processor) {
+            throw new LogicException('The processor must be either callable or instance of Processor');
+        }
+
+        $processorName = $processorName ?: uniqid(get_class($processor));
+
+        $this->driver->getRouteCollection()->add(new Route($topic, Route::TOPIC, $processorName));
+        $this->processorRegistry->add($processorName, $processor);
+    }
+
+    /**
+     * @param string $command
+     * @param callable|Processor $processor
+     * @param string|null $processorName
+     */
+    public function bindCommand(string $command, $processor, string $processorName = null): void
+    {
+        if (is_callable($processor)) {
+            $processor = new CallbackProcessor($processor);
+        }
+
+        if (false == $processor instanceof Processor) {
+            throw new LogicException('The processor must be either callable or instance of Processor');
+        }
+
+        $processorName = $processorName ?: uniqid(get_class($processor));
+
+        $this->driver->getRouteCollection()->add(new Route($command, Route::COMMAND, $processorName));
+        $this->processorRegistry->add($processorName, $processor);
+    }
+
+    /**
+     * @param string $command
+     * @param string|array|JsonSerializable|Message $message
+     * @param bool $needReply
+     * @return Promise|null
+     */
+    public function sendCommand(string $command, $message, bool $needReply = false): ?Promise
+    {
+        return $this->producer->sendCommand($command, $message, $needReply);
+    }
+
+    /**
+     * @param string $topic
+     * @param string|array|Message $message
+     */
+    public function sendEvent(string $topic, $message): void
+    {
+        $this->producer->sendEvent($topic, $message);
+    }
+
+    public function consume(ExtensionInterface $runtimeExtension = null): void
+    {
+        $this->setupBroker();
+
+        $boundQueues = [];
+
+        $routerQueue = $this->getDriver()->createQueue($this->getDriver()->getConfig()->getRouterQueue());
+        $this->queueConsumer->bind($routerQueue, $this->delegateProcessor);
+        $boundQueues[$routerQueue->getQueueName()] = true;
+
+        foreach ($this->driver->getRouteCollection()->all() as $route) {
+            $queue = $this->getDriver()->createRouteQueue($route);
+            if (array_key_exists($queue->getQueueName(), $boundQueues)) {
+                continue;
+            }
+
+            $this->queueConsumer->bind($queue, $this->delegateProcessor);
+
+            $boundQueues[$queue->getQueueName()] = true;
+        }
+
+        $this->queueConsumer->consume($runtimeExtension);
+    }
+
+    public function setupBroker(): void
+    {
+        $this->getDriver()->setupBroker();
+    }
+
+    public function getDriver(): DriverInterface
+    {
+        return $this->driver;
+    }
+
+    public function getQueueConsumer(): QueueConsumerInterface
+    {
+        return $this->queueConsumer;
+    }
+
+    public function getProducer(bool $setupBroker = false): ProducerInterface
+    {
+        $setupBroker && $this->setupBroker();
+
+        return $this->producer;
+    }
+
+    public function getDelegateProcessor(): DelegateProcessor
+    {
+        return $this->delegateProcessor;
     }
 }

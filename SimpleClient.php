@@ -246,7 +246,7 @@ final class SimpleClient
 
         $rootNode->children()
             ->arrayNode('extensions')->addDefaultsIfNotSet()->children()
-            ->booleanNode('custom_extensions')->defaultValue([])->end()
+            ->arrayNode('custom_extensions')->defaultValue([])->end()
             ->booleanNode('signal_extension')->defaultFalse()->end()
             ->booleanNode('reply_extension')->defaultTrue()->end()
             ->end();

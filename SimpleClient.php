@@ -246,7 +246,8 @@ final class SimpleClient
 
         $rootNode->children()
             ->arrayNode('extensions')->addDefaultsIfNotSet()->children()
-            ->booleanNode('signal_extension')->defaultValue(function_exists('pcntl_signal_dispatch'))->end()
+            ->booleanNode('custom_extensions')->defaultValue([])->end()
+            ->booleanNode('signal_extension')->defaultFalse()->end()
             ->booleanNode('reply_extension')->defaultTrue()->end()
             ->end();
 

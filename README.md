@@ -1,3 +1,7 @@
+# Fork goals
+- Allow adding custom [consumption extensions](https://github.com/php-enqueue/enqueue-dev/blob/4371fce4a577d8b03e2f313e656db4d7c6289705/docs/quick_tour.md#consumption)
+- Eventually, switch to [ReactPHP](https://github.com/reactphp/event-loop) instead of Symphony to make it compatiable with [Ratchet](https://github.com/ratchetphp/Ratchet)
+
 <h2 align="center">Supporting Enqueue</h2>
 
 Enqueue is an MIT-licensed open source project with its ongoing development made possible entirely by the support of community and our customers. If you'd like to join them, please consider:
